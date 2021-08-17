@@ -1,0 +1,16 @@
+Metadata-Version: 1.1
+Name: cherrypyrest
+Version: 0.2.1.5
+Summary: A REST like implementation of cherrypy
+Home-page: https://github.com/pypa/sampleproject
+Author: Umesh Chaudhary
+Author-email: 2umeshchaudhary@gmail.com
+License: UNKNOWN
+Description-Content-Type: UNKNOWN
+Description: UNKNOWN
+Keywords: cherrypyrest RESTful cherrypy
+Platform: UNKNOWN
+Classifier: Development Status :: 4 - Beta
+Classifier: Intended Audience :: Developers
+Classifier: Topic :: Software Development :: Build Tools
+Classifier: Programming Language :: Python :: 2.7
