@@ -1,16 +1,22 @@
-'''
+"""
   Created on Dec 25, 2017
   @author: Umesh Chaudhary
-'''
-import cherrypy
+"""
+from __future__ import print_function
+from builtins import str
+from builtins import object
+import datetime as datetime_lib
 import traceback
-import simplejson
 
+import cherrypy
+import simplejson
 from bson.objectid import ObjectId
 
-from . import constants
-from .utils import encode
-from .rest_exceptions import APIException
+from . import messages
+from .exceptions import APIException
+from .utils import decode
+from .utils import format_response
+from .utils import unicode_to_python_obj
 
 
 class GenericAPI(object):
@@ -27,16 +33,14 @@ class GenericAPI(object):
     """
       Initialze all api related classes.
     """
-    self.db = kwargs['db']
+    # self.db = kwargs['db']
     if not self.service:
-      raise APIException(500, constants.NO_SERVICE_DEFINED)
-    self.service = self.service(self.db)
+      raise APIException(500, messages.NO_SERVICE_DEFINED)
+    self.service = self.service()
     # self.serializer = self.service.serializer
-    self.manager = self.service.manager
+    # self.manager = self.service.manager
     # self.serializer.manager = self.manager
 
-  @cherrypy.expose
-  @cherrypy.tools.json_out()
   def default(self, *args, **kwargs):
     """
      Default method executes for every request.
@@ -45,40 +49,63 @@ class GenericAPI(object):
     """
     method = getattr(self, cherrypy.request.method.upper(), None)
     if not method:
-      raise APIException(400, constants.METHOD_NOT_AVAILABLE.format(
+      raise APIException(400, messages.METHOD_NOT_AVAILABLE.format(
           cherrypy.request.method.upper()))
     self.request = cherrypy.request
+    self.request.user = cherrypy.request.cookie.get('user')
+    self.request.account = cherrypy.request.cookie.get('account')
+    self.args = args
+    self.kwargs = kwargs
     try:
       kwargs = self.pre_request_validation(*args, **kwargs)
       resp = method(*args, **kwargs)
-    except UnicodeEncodeError, UnicodeDecodeError:
-      raise APIException(400, constants.INVALID_INPUT_DATA)
+    except UnicodeEncodeError:
+      print('unicode encode error')
+      print(traceback.format_exc())
+      raise APIException(400, messages.INVALID_INPUT_DATA, data={
+          "traceback": traceback.format_exc()
+      })
+    except UnicodeDecodeError:
+      print('unicode decode error')
+      print(traceback.format_exc())
+      raise APIException(400, messages.INVALID_INPUT_DATA, data={
+          "traceback": traceback.format_exc()
+      })
     except ValueError as ex:
-      raise APIException(400, constants.INVALID_DATA.format(ex.message))
+      print('value error')
+      print(traceback.format_exc())
+      raise APIException(400, messages.INVALID_DATA.format(str(ex)), {
+          "traceback": traceback.format_exc()
+      })
     except KeyError as ex:
-      print traceback.format_exc()
-      raise APIException(500, constants.KEY_ERROR.format(ex.message))
+      print('key error')
+      print(traceback.format_exc())
+      raise APIException(500, messages.KEY_ERROR.format(str(ex)), {
+          "traceback": traceback.format_exc()
+      })
     except Exception as ex:
       status_code = 500
-      message = 'Internal Server Error. Actual exception was: {}'.format(
-          ex.message)
-      data = {}
+      message = 'Internal Server Error. Actual exception was: {}'.format(str(ex))
+      data = {'traceback': traceback.format_exc()}
       if len(ex.args) > 0 and isinstance(ex.args[0], int):
         status_code = ex.args[0]
-      if len(ex.args) > 1 and isinstance(ex.args[1], (str, unicode)):
+      if len(ex.args) > 1 and isinstance(ex.args[1], (str, str)):
         message = str(ex.args[1])
       if len(ex.args) > 2 and isinstance(ex.args[2], dict):
         data = ex.args[2]
+      # else:
+      #   data = 
       raise APIException(status_code, message, data=data)
     self.finalize_response(resp)
-    self.format_response(resp)
+    format_response(resp)
     return {
-        'success': True,
-        'message': 'success',
+        'success': resp.get('success', True) if isinstance(resp, dict) else True,
+        'message': resp.get('message', True) if isinstance(resp, dict) else "success",
         'data': resp
     }
 
-  def parse_request_data(self):
+  @staticmethod
+  def parse_request_data():
     """
       Cherry doesn't provide support for handling content-type application/json' in post
       or put requests. So this method extract data from cherrypy request and  converts it into json.
@@ -88,59 +115,39 @@ class GenericAPI(object):
       rawbody = cherrypy.request.body.read(int(cl))
       return simplejson.loads(rawbody)
     except APIException as ex:
-      raise APIException(400, constants.INVALID_DATA.format(ex.message))
+      raise APIException(400, messages.INVALID_DATA.format(str(ex)))
+    # return cherrypy.request.json
+
+  def get_object_id_from_url(self):
+    for obj in self.args:
+      try:
+        return ObjectId(decode(obj))
+      except:
+        pass
+    return None
 
   def pre_request_validation(self, *args, **kwargs):
     """
       Performs data validation and permission check before handling request to actual api endpoint.
     """
+    self.pk = self.get_object_id_from_url()
 
     # Excetue all permissions in the controller
     for permission in self.permissions:
       permission(self, *args, **kwargs).has_permission()
+
+    data = dict()
     if cherrypy.request.method.upper() == 'GET':
-      self.format_request(kwargs)
-      params = self.serializer.validate_params(kwargs)
-    else:
-      data = self.parse_request_data()
-      self.format_request(data)
-      params = self.serializer.validate_data(data)
-    return params
+      return unicode_to_python_obj(kwargs)
+      # params = self.serializer.validate_params(kwargs)
+    if 'apis/files/' in cherrypy.request.path_info:
+      return unicode_to_python_obj(kwargs)
+    if cherrypy.request.method.upper() in ['POST', 'PUT']:
+      return unicode_to_python_obj(self.parse_request_data())
+    return data
 
-  def format_request(self, data):
-    """
-      Formats the gievn data into valid python objects.
-    """
-    if isinstance(data, (list, tuple)):
-      for obj in data:
-        self.format_request(obj)
-    if isinstance(data, dict):
-      for key, value in data.items():
-        if isinstance(value, (list, tuple)):
-          for item in value:
-            self.format_request(item)
-        if isinstance(value, dict):
-          self.format_request(value)
-        str(value)
-
-  def format_response(self, resp):
-    """
-      Formats the end result into serializable objects.
-    """
-    if isinstance(resp, (list, tuple)):
-      for obj in resp:
-        self.format_response(obj)
-    if isinstance(resp, dict):
-      for key, value in resp.items():
-        if isinstance(value, (list, tuple)):
-          for item in value:
-            self.format_response(item)
-        if isinstance(value, dict):
-          self.format_response(value)
-        if isinstance(value, ObjectId):
-          resp[key] = encode(str(value))
-
-  def finalize_response(self, resp):
+  @staticmethod
+  def finalize_response(resp):
     """
       Any last minute changes in the response needs to be done here.
     """
@@ -159,7 +166,7 @@ class ListAPI(GenericAPI):
       This method must be implemented in every list API
     """
     raise APIException(
-        500, constants.METHOD_NOT_IMPLEMENTED.format('get_queryset'))
+        500, messages.METHOD_NOT_IMPLEMENTED.format('get_queryset'))
 
   def GET(self, *args, **kwargs):
     """
@@ -180,7 +187,7 @@ class CreateAPI(GenericAPI):
       This method must be implemented in order to create a new object
     """
     raise APIException(
-        500, constants.METHOD_NOT_IMPLEMENTED.format('perform_create'))
+        500, messages.METHOD_NOT_IMPLEMENTED.format('perform_create'))
 
   def POST(self, *args, **kwargs):
     """
@@ -214,15 +221,15 @@ class RetrieveAPI(GenericAPI):
 
 class UpdateAPI(GenericAPI):
 
-  def perfom_update(self, data):
+  def perform_update(self, data):
     """
       This method must be implemented in order to create a new object
     """
     raise APIException(
-        500, constants.METHOD_NOT_IMPLEMENTED.format('perform_update'))
+        500, messages.METHOD_NOT_IMPLEMENTED.format('perform_update'))
 
   def PUT(self, *args, **kwargs):
-    return self.perfom_update(kwargs)
+    return self.perform_update(kwargs)
 
 
 class DestroyAPI(GenericAPI):
@@ -230,20 +237,20 @@ class DestroyAPI(GenericAPI):
     Defines methods and attributes rewuired for deleteing an object
   """
 
-  def perform_delete(self, object):
+  def perform_delete(self, **kwargs):
     """
       This method must be implemented in order to delete an existing object
     """
     raise APIException(
-        500, constants.METHOD_NOT_IMPLEMENTED.format('perform_delete'))
+        500, messages.METHOD_NOT_IMPLEMENTED.format('perform_delete'))
 
   def DELETE(self, *args, **kwargs):
     """
       Checks object level permission classes and deletes an object.
     """
-    if not self.permissions:
-      raise APIException(500, 'No Object permission class is defind')
-    return self.perform_delete(self, self.object)
+    # if not self.permissions:
+    #   raise APIException(500, 'No Object permission class is defind')
+    return self.perform_delete(**kwargs)
 
 
 class RetrieveUpdateAPI(RetrieveAPI, UpdateAPI):

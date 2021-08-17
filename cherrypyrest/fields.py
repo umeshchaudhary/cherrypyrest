@@ -1,345 +1,455 @@
-'''
+"""
   Created on Dec 25 2017
   @author: Umesh Chaudhary
-'''
+"""
 
-import pytz, re, copy, traceback
-import json
+from builtins import str
+from builtins import object
+import datetime as datetime_lib
+import re
 
-from datetime import datetime
 from bson.objectid import ObjectId
-from bson import json_util
+from dateutil import parser as dt_parser
 
-import messages
-import utils
+from . import messages
+from . import utils
+
+
+class Empty(object):
+  _instance = None
+
+  def __new__(cls):
+    if cls._instance:
+      return cls._instance
+    cls._instance = super(Empty, cls).__new__(cls)
+    return cls._instance
 
 
 class Field(object):
-  
-  _name = None
-  _null = False
-  _value = None
-  _choices = []
-  _default = None
-  _initial = None
-  _required = False
-  _parent_class = None
+  _null_types = (Empty(), None)
+  required = False
+  null = False
+  default = None
+  choices = []
+  model = None
+  name = None
 
-  def __init__(self, **kwargs):
-    if 'required' in kwargs:
-      assert isinstance(kwargs['required'], bool)
-      self._required = kwargs['required']
-    if 'default' in kwargs:
-      assert 'required' not in kwargs, 'required and default can\'t be set together'
-      try:
-        self._default = self.get_object(kwargs['default'])
-      except Exception as ex:
-        raise Exception(
-            'invalid default value for the field \'{}\''.format(
-                self._name
-        ))
-    if 'null' in kwargs:
-      assert 'required' not in kwargs, 'required and null can\'t be set together'
-      assert 'default' not in kwargs, 'default and null can\'t be set together'
-      assert isinstance(kwargs['null'], bool)
-      self._null = kwargs['null']
-    if 'choices' in kwargs:
-      assert isinstance(kwargs['choices'], (list, tuple))
-      self._choices = kwargs['choices']
+  def _initialize_obj_with_default_values(self):
+    self.required = self.__class__.required
+    self.null = self.__class__.null
+    self.default = self.__class__.default
+    self.choices = self.__class__.choices
+    self.model = self.__class__.model
+    self.name = self.__class__.name
 
+  def __init__(self, required=Empty(), null=Empty(), default=Empty(), choices=Empty(), **kwargs):
+    self._initialize_obj_with_default_values()
+    if not isinstance(required, Empty):
+      assert isinstance(required, bool), 'must be of boolean type'
+      self.required = required
+    if not isinstance(null, Empty):
+      assert isinstance(null, bool), 'must be of boolean type'
+      self.null = null
+    if not isinstance(choices, Empty):
+      assert isinstance(choices, (list, tuple)), 'must be of type list or tuple'
+      self.choices = choices
+    if not isinstance(default, Empty):
+      assert default not in self._null_types, 'can not set null value as a default for the field explicitly'
+      self.default = self.validate(default)
+    if self.required:
+      assert not self.null
+      assert not self.default
+    if self.null:
+      assert not self.required
+      assert not self.default
+    if self.default:
+      assert not self.null
+      assert not self.required
+    if self.choices and self.default:
+      assert self.default in self.choices
+    self.__dict__.update(kwargs)
 
-  def set_value(self, value=None):
-    self._initial = value
-    if not value:
-      if self._required:
+  def get_default_value(self):
+    if self.null:
+      return None
+    return self.default
+
+  def _validate_object(self, value):
+    return value
+
+  def validate(self, value=Empty()):
+    if value in self._null_types:
+      if self.required:
         raise Exception(
             400, messages.VALIDATION_ERROR,
             messages.REQUIRED_FIELD
         )
-      self.clear()
-      return
-    self._value = self.get_object(value)
-  
-  def get_object(self, value):
+      return self.get_default_value()
+    return self._validate_object(value)
+
+  def set_value(self, value=Empty()):
+    return self.validate(value)
+
+  def serialize(self, value):
+    if value in self._null_types:
+      return self.get_default_value()
+    return self._serialize_object(value)
+
+  def _serialize_object(self, value):
     return value
 
-  @property
-  def value(self):
-    return self._value
+  def db_repr(self, value):
+    if value in self._null_types:
+      return self.get_default_value()
+    return self._db_repr_object(value)
 
-  def clear(self):
-    if self._null:
-      self._value = None
-    else:
-      self._value = self._default
-  
-  def serialize(self):
-    return self.serialize_object(self.value)
-  
-  def serialize_object(self, value):
-    return value
-
-  def db_repr(self):
-    return self.db_object(self.value)
-  
-  def db_object(self, value):
+  def _db_repr_object(self, value):
     return value
 
 
 class Boolean(Field):
-  _default = False
+  default = False
 
-  def get_object(self, value):
+  def _validate_object(self, value):
     if not isinstance(value, bool):
       raise Exception(
           400, messages.VALIDATION_ERROR,
-          messages.INVALID_BOOLEAN.format(value)
+          messages.INVALID_BOOLEAN
       )
     return value
 
 
 class DateTime(Field):
-  
-  _default = utils.now
+  auto_add = False
 
-  def get_object(self, value):
-    if not isinstance(value, datetime):
+  def __init__(self, auto_add=Empty(), required=Empty(), default=Empty(), null=Empty(), **kwargs):
+    assert isinstance(default, Empty), 'Default attribute not applicable on datetime field'
+    super(DateTime, self).__init__(required=required, default=default, null=null, **kwargs)
+    if not isinstance(auto_add, Empty):
+      assert isinstance(auto_add, bool)
+      assert not self.null
+      assert not self.required
+      self.auto_add = auto_add
+
+  def _initialize_obj_with_default_values(self):
+    super(DateTime, self)._initialize_obj_with_default_values()
+    self.auto_add = self.__class__.auto_add
+
+  def _validate_object(self, value):
+    if isinstance(value, (str, bytes)):
+      try:
+        value = dt_parser.parse(value)
+      except:
+        raise Exception(
+            400, messages.VALIDATION_ERROR,
+            messages.INVALID_DATETIME
+        )
+    if isinstance(value, (int, float)):
       try:
         value = utils.millis_since_epoch_to_datetime(value)
       except:
         raise Exception(
             400, messages.VALIDATION_ERROR,
-            messages.INVALID_DATETIME.format(value)
+            messages.INVALID_DATETIME
         )
+    if not isinstance(value, datetime_lib.datetime):
+      raise Exception(
+          400, messages.VALIDATION_ERROR,
+          messages.INVALID_DATETIME
+      )
+    if not value.tzinfo and getattr(self, 'localize', True):
+      value = utils.localize(value)
     return value
 
-  def serialize_object(self, value):
-    return utils.datetime_to_millis(value) if value else None
+  def get_default_value(self):
+    value = super(DateTime, self).get_default_value()
+    if self.auto_add:
+      value = utils.now()
+    return value
 
-  def clear(self):
-    if self._null:
-      self._value = None
-    else:
-      self._value = utils.now()
+  def _serialize_object(self, value):
+    return int(utils.datetime_to_millis(value))
+
+
+class DateField(Field):
+
+  def _validate_object(self, value):
+    if isinstance(value, (str, bytes)):
+      try:
+        value = dt_parser.parse(value).date()
+      except:
+        raise Exception(
+            400, messages.VALIDATION_ERROR,
+            messages.INVALID_DATE
+        )
+    if isinstance(value, datetime_lib.datetime):
+      value = value.date()
+    if not isinstance(value, datetime_lib.date):
+      raise Exception(
+          400, messages.VALIDATION_ERROR,
+          messages.INVALID_DATE
+      )
+    return value
+
+  def _serialize_object(self, value):
+    return value.isoformat()
+
+  def _db_repr_object(self, value):
+    return dt_parser.parse(value.isoformat())
+
+
+class TimeField(Field):
+
+  def _validate_object(self, value):
+    if isinstance(value, (str, bytes)):
+      try:
+        value = dt_parser.parse(value).time()
+      except:
+        raise Exception(
+            400, messages.VALIDATION_ERROR,
+            messages.INVALID_TIME
+        )
+    if isinstance(value, datetime_lib.datetime):
+      value = value.time()
+    if not isinstance(value, datetime_lib.time):
+      raise Exception(
+          400, messages.VALIDATION_ERROR,
+          messages.INVALID_TIME
+      )
+    return value
+
+  def _db_repr_object(self, value):
+    return value.isoformat()
+
+  def _serialize_object(self, value):
+    return {
+        'hours': value.hour,
+        'minutes': value.minute,
+        'seconds': value.second
+    }
 
 
 class String(Field):
-  
-  _default = ''
+  _null_types = (Empty(), None, '')
+  default = ''
 
-  def get_object(self, value):
-    if not isinstance(value, (str, unicode)):
+  def _initialize_obj_with_default_values(self):
+    super(String, self)._initialize_obj_with_default_values()
+    self.default = self.__class__.default
+
+  def _validate_object(self, value):
+    if not isinstance(value, (str, bytes)):
       raise Exception(
           400, messages.VALIDATION_ERROR,
-          messages.INVALID_STRING.format(value)
+          messages.INVALID_STRING
       )
-    if self._choices and value not in self._choices:
+    if isinstance(value, bytes):
+      value = value.decode('utf-8')
+
+    value = value.strip()
+
+    if not value:
       raise Exception(
           400, messages.VALIDATION_ERROR,
-          messages.INVALID_STRING_CHOICE.format(value)
+          messages.REQUIRED_FIELD
+      )
+    if self.choices and value not in self.choices:
+      raise Exception(
+          400, messages.VALIDATION_ERROR,
+          messages.INVALID_STRING_CHOICE
       )
     return value
+
+  def _serialize_object(self, value):
+    if isinstance(value, bytes):
+      return value.decode('utf-8')
+    return value.strip()
+
+  def _db_repr_object(self, value):
+    if isinstance(value, bytes):
+      return value.decode('utf-8')
+    return value.strip()
 
 
 class Email(String):
 
-  _default = None
+  user_regex = re.compile(
+      r"(^[-!#$%&'*+/=?^_`{}|~0-9A-Z]+(\.[-!#$%&'*+/=?^_`{}|~0-9A-Z]+)*\Z"  # dot-atom
+      r'|^"([\001-\010\013\014\016-\037!#-\[\]-\177]|\\[\001-\011\013\014\016-\177])*"\Z)',  # quoted-string
+      re.IGNORECASE)
 
-  email_regex = re.compile(
-      '^[A-Za-z0-9._]{1}[A-Za-z0-9._-]*@[A-Za-z0-9._-]*[A-Za-z0-9._]{1}$')
+  domain_regex = re.compile(
+      # max length for domain name labels is 63 characters per RFC 1034
+      r'((?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+)(?:[A-Z0-9-]{2,63}(?<!-))\Z',
+      re.IGNORECASE)
 
-  def get_object(self, value):
-    value = super(Email, self).get_object(value)
-    if value is not None and not self.email_regex.match(value):
+  def _validate_object(self, value):
+    if not isinstance(value, (str, bytes)):
       raise Exception(
           400, messages.VALIDATION_ERROR,
-          messages.INVALID_EMAIL.format(value)
+          messages.INVALID_STRING
+      )
+    if isinstance(value, bytes):
+      try:
+        value = value.decode('utf-8')
+      except Exception as ex:
+        raise Exception(
+            400,
+            messages.VALIDATION_ERROR,
+            messages.INVALID_STRING
+        )
+
+    value = value.strip()
+
+    if not value:
+      raise Exception(
+          400, messages.VALIDATION_ERROR,
+          messages.REQUIRED_FIELD
+      )
+    user_part, domain_part = value.split('@')
+    if not self.user_regex.match(user_part) or not self.domain_regex.match(domain_part):
+      raise Exception(
+          400, messages.VALIDATION_ERROR,
+          messages.INVALID_EMAIL
       )
     return value
 
 
 class Number(Field):
 
-  _default = 0
-
-  def get_object(self, value):
+  def _validate_object(self, value):
     if not isinstance(value, (int, float)):
       raise Exception(
-        400, messages.VALIDATION_ERROR,
-        messages.INVALID_NUMBER.format(value))
+          400, messages.VALIDATION_ERROR,
+          messages.INVALID_NUMBER)
+    if self.choices and value not in self.choices:
+      raise Exception(
+          400, messages.VALIDATION_ERROR,
+          messages.INVALID_STRING_CHOICE
+      )
     return value
 
 
 class ObjectID(Field):
+  _null_types = (Empty(), None, '')
 
-  def get_object(self, value):
+  def _validate_object(self, value):
     if not isinstance(value, ObjectId):
       try:
         value = ObjectId(utils.decode(str(value)))
       except:
         raise Exception(
             400, messages.VALIDATION_ERROR,
-            messages.INVALID_OBJECT_ID.format(value)
+            messages.INVALID_OBJECT_ID
         )
     return value
 
-  def serialize_object(self, value):
-    return utils.encode(str(value)) if value else None
+  def _serialize_object(self, value):
+    return utils.encode(str(value))
 
 
 class RelatedField(Field):
-  
-  _child = None
-  _many = False
+  _null_types = (Empty(), None, {}, [])
 
-  def __init__(self, **kwargs):
-    assert 'child' in kwargs, "child must be supplied as the first argument"
-    self._child = kwargs['child']
-    if 'many' in kwargs:
-      assert isinstance(kwargs['many'], bool)
-      self._many = kwargs['many']
+  def __init__(self, child=Empty(), many=Empty(), default=Empty(), choices=Empty(), **kwargs):
+    assert isinstance(default, Empty), '`default` attribute not applicable on Related field'
+    assert isinstance(choices, Empty), '`choices` attribute not applicable on Related field'
+    self.many = False
+    assert not isinstance(child, Empty), "`child` must be supplied as a first argument"
+    try:
+      self.child = utils.import_module(child)
+    except Exception as ex:
+      raise Exception('Invalid Module suplied as a value for child argument in RelatedField')
+    if not isinstance(many, Empty):
+      assert isinstance(many, bool)
+      self.many = many
     super(RelatedField, self).__init__(**kwargs)
-  
-  def set_value(self, value=None):
-    self._initial = value
-    if not value:
-      if self._required:
-        raise Exception(
-            400, messages.VALIDATION_ERROR,
-            messages.REQUIRED_FIELD
-        )
-      self.clear()
-      if self._null:
-        return
-      value = self._value
-    if self._many:
-      if not isinstance(value, (list, tuple)):
-        raise Exception(
-            400, messages.VALIDATION_ERROR,
-            messages.INVALID_STRING_WITH_MANY_TRUE.format(type(value))
-        )
-      value_list = []
-      errors = dict()
-      for index, obj in enumerate(value):
-        try:
-          value_list.append(self.get_object(obj))
-        except Exception as ex:
-          errors[index] = ex.args[2]
-          continue
-      if errors:
-        raise Exception(400, messages.VALIDATION_ERROR, errors)    
-      self._value = value_list
-      return
-    self._value = self.get_object(value)
 
-  def get_object(self, value):
-    obj = copy.copy(self._child)
-    obj.set_value(value)
-    if obj.__module__ == self.__module__:
-      obj = obj.value
-    return obj
-  
-  def clear(self):
-    if self._null:
-      self._value = None
-    elif self._many and not self._default:
-      self._value = []
-    else:
-      self._value = self._default
+  def get_default_value(self):
+    if self.many:
+      return []
+    return None
 
-  def serialize(self):
-    if not self._many:
-      return self.serialize_object(self.value)
-    
-    json_dict_list = []
-    errors = dict()
-    for index, obj in enumerate(self.value):
-      try:
-        json_dict_list.append(self.serialize_object(obj))
-      except Exception as ex:
-        print traceback.format_exc()
-        errors[index] = ex.args[2]      
-      if errors:
-        raise Exception(400, messages.VALIDATION_ERROR, errors)
+  def _validate_object(self, value):
+    return self._opr_on_related_object(value, '_validate_related_object')
 
-    return json_dict_list
+  def _db_repr_object(self, value):
+    return self._opr_on_related_object(value, '_db_repr_related_object')
 
-  def serialize_object(self, obj):
-    if isinstance(obj, (int, float, str, unicode, bool)):
-      return obj
-    if isinstance(obj, datetime):
-      obj = DateTime()
-      obj.set_value(obj)
-    if isinstance(obj, ObjectId):
-      obj = ObjectID()
-      obj.set_value(obj)
+  def _serialize_object(self, value):
+    return self._opr_on_related_object(value, '_serialize_related_object')
+
+  def _validate_related_object(self, value):
+    if not isinstance(value, dict) and '_id' in getattr(self.child, 'fields', []):
+        obj = self.fake_db_object(getattr(self.child, 'db_fields', []))
+        obj['_id'] = ObjectID(required=True).validate(value)
+        value = obj
+    return self.child.validate(value)
+
+  @staticmethod
+  def fake_db_object(db_fields):
+    value = dict()
+    for field in db_fields:
+      value[field] = Empty()
+    return value
+
+  def _serialize_related_object(self, obj):
+    if self.child.__module__ == self.__module__:
+      return self.child.serialize(obj)
     return obj.serialize()
 
-  def db_repr(self):
-    if not self._many:
-      return self.db_object(self.value)
-
-    db_dict_list = []
-    errors = dict()
-    for index, obj in enumerate(self.value):
-      try:
-        db_dict_list.append(self.db_object(obj))
-      except Exception as ex:
-        print traceback.format_exc()
-        errors[index] = ex.args[2]
-      if errors:
-        raise Exception(400, messages.VALIDATION_ERROR, errors)
-
-    return db_dict_list
-
-  def db_object(self, obj):
-    if isinstance(obj, (int, float, str, unicode, bool, datetime, ObjectId)):
-      return obj
+  def _db_repr_related_object(self, obj):
+    if self.child.__module__ == self.__module__:
+      return self.child.db_repr(obj)
     return obj.db_repr()
 
+  def _opr_on_related_object(self, value, method):
+    if not self.many:
+      return getattr(self, method)(value)
 
-class Dict(dict):
+    objects = list()
+    errors = dict()
+    for index, obj in enumerate(value):
+      try:
+        objects.append(getattr(self, method)(obj))
+      except Exception as ex:
+        errors[index] = ex.args[2] if len(ex.args) >= 2 else ex.args[0]
+        continue
+    if errors:
+      raise Exception(400, messages.VALIDATION_ERROR, errors)
+    return objects
 
-  _name = None
-  _null = False
-  _value = None
-  _initial = None
-  _required = False
+
+class Dict(Field):
+
+  default = dict()
 
   def __init__(self, **kwargs):
-    if 'required' in kwargs:
-      assert isinstance(kwargs['required'], bool)
-      self._required = kwargs['required']
-    if 'null' in kwargs:
-      assert isinstance(kwargs['null'], bool)
-      self._null = kwargs['null']
-    super(Dict, self).__init__()
-  
-  def set_value(self, value=dict()):
-    self._initial = value
-    if not value:
-      if self._required:
+    super(Dict, self).__init__(**kwargs)
+    self.default = dict()
+
+  def validate(self, value=Empty()):
+    if value in self._null_types:
+      if self.required:
         raise Exception(
             400, messages.VALIDATION_ERROR,
             messages.REQUIRED_FIELD
         )
-      if self._null:
-        return
-      value = dict()
-    if not isinstance(value, dict):
+      return dict()
+    return self._validate_object(value)
+
+  def _validate_object(self, obj):
+    if not isinstance(obj, dict):
       raise Exception(
-          400, messages.VALIDATION_ERROR,
-          messages.INVALID_DATA_FORMAT.format('dict', type(value))
+          400,
+          messages.VALIDATION_ERROR,
+          messages.INVALID_DATA_FORMAT.format('dict', type(obj))
       )
-    super(Dict, self).__init__(**value)
+    return utils.unicode_to_python_obj(obj)
 
-  def serialize(self):
-    return self
-
-  def db_repr(self):
-    return json_util.loads(json.dumps(self))
-
-  @property
-  def value(self):
-    return self
-
+  def _serialize_object(self, value):
+    db_dict = value.copy()
+    for k, v in list(db_dict.items()):
+      if isinstance(v, datetime_lib.datetime):
+        db_dict[k] = utils.datetime_to_millis(v)
+    return db_dict

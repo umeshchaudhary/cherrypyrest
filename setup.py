@@ -38,7 +38,7 @@ setup(
     # For a discussion on single-sourcing the version across setup.py and the
     # project code, see
     # https://packaging.python.org/en/latest/single_source_version.html
-    version='0.2.1.5',  # Required
+    version='0.2.1.6',  # Required
 
     # This is a one-line description or tagline of what your project does. This
     # corresponds to the "Summary" metadata field:
@@ -59,7 +59,7 @@ setup(
     #
     # This field corresponds to the "Home-Page" metadata field:
     # https://packaging.python.org/specifications/core-metadata/#home-page-optional
-    url='https://github.com/pypa/sampleproject',  # Optional
+    url='https://github.com/umeshchaudhary/cherrypyrest',  # Optional
 
     # This should be your name or the name of the organization which owns the
     # project.
@@ -104,7 +104,7 @@ setup(
     #
     #   py_modules=["my_module"],
     #
-    packages=['cherrypyrest', 'gridfs'],  # Required
+    packages=['cherrypyrest'],  # Required
 
     # This field lists other packages that your project depends on to run.
     # Any package you put here will be installed by pip when your project is
@@ -112,7 +112,14 @@ setup(
     #
     # For an analysis of "install_requires" vs pip's requirements files see:
     # https://packaging.python.org/en/latest/requirements.html
-    # install_requires=['cherrypy', 'pymongo', ],  # Optional
+    install_requires=[
+        'cherrypy',
+        'pymongo',
+        'bson',
+        'pycryptodome',
+        'mongomock',
+        'pytz'
+    ],  # Optional
 
     # List additional groups of dependencies here (e.g. development
     # dependencies). Users will be able to install these using the "extras"
@@ -155,4 +162,5 @@ setup(
     #         'sample=sample:main',
     #     ],
     # },
+    download_url = 'https://github.com/umeshchaudhary/cherrypyrest/archive/refs/tags/0.2.1.5.zip',
 )
